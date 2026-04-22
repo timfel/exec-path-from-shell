@@ -1,6 +1,6 @@
 ;;; exec-path-from-shell.el --- Get environment variables such as $PATH from the shell  -*- lexical-binding: t -*-
 
-;; Copyright (C) 2012-2014 Steve Purcell
+;; Copyright (C) 2012-2026 Steve Purcell
 
 ;; Author: Steve Purcell <steve@sanityinc.com>
 ;; Keywords: unix, environment
