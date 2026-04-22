@@ -147,8 +147,8 @@ The default value denotes an interactive login shell."
 (defmacro exec-path-from-shell--warn-duration (&rest body)
   "Evaluate BODY and warn if execution duration exceeds a time limit.
 The limit is given by `exec-path-from-shell-warn-duration-millis'."
-  (let ((start-time (cl-gensym))
-        (duration-millis (cl-gensym)))
+  (let ((start-time (gensym))
+        (duration-millis (gensym)))
     `(let ((,start-time (current-time)))
        (prog1
            (progn ,@body)
