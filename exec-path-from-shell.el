@@ -140,6 +140,11 @@ The default value denotes an interactive login shell."
   "Return non-nil if SHELL is nu."
   (string-match-p "nu$" shell))
 
+(defun exec-path-from-shell--powershell-p (shell)
+  "Return non-nil if SHELL is a PowerShell executable."
+  (member (downcase (file-name-nondirectory shell))
+          '("powershell" "powershell.exe" "pwsh" "pwsh.exe")))
+
 (defun exec-path-from-shell--standard-shell-p (shell)
   "Return non-nil iff SHELL supports the standard ${VAR-default} syntax."
   (not (string-match-p "\\(fish\\|nu\\|t?csh\\)$" shell)))
@@ -157,6 +162,9 @@ The limit is given by `exec-path-from-shell-warn-duration-millis'."
                (message "Warning: exec-path-from-shell execution took %dms. See the README for tips on reducing this." ,duration-millis)
              (exec-path-from-shell--debug "Shell execution took %dms" ,duration-millis)))))))
 
+(declare-function exec-path-from-powershell-printf "exec-path-from-powershell"
+                  (shell str &optional args))
+
 (defun exec-path-from-shell-printf (str &optional args)
   "Return the result of printing STR in the user's shell.
 
@@ -169,29 +177,33 @@ by printf.
 ARGS is an optional list of args which will be inserted by printf
 in place of any % placeholders in STR.  ARGS are not automatically
 shell-escaped, so they may contain $ etc."
-  (let* ((printf-bin (or (executable-find "printf") "printf"))
-         (printf-command
-          (concat (shell-quote-argument printf-bin)
-                  " '__RESULT\\000" str "\\000__RESULT' "
-                  (mapconcat #'exec-path-from-shell--double-quote args " ")))
-         (shell (exec-path-from-shell--shell))
-         (shell-args (append exec-path-from-shell-arguments
-                             (list "-c"
-                                   (if (exec-path-from-shell--standard-shell-p shell)
-                                       printf-command
-                                     (concat "sh -c " (shell-quote-argument printf-command)))))))
-    (with-temp-buffer
-      (exec-path-from-shell--debug "Invoking shell %s with args %S" shell shell-args)
-      (let ((exit-code (exec-path-from-shell--warn-duration
-                        (apply #'call-process shell nil t nil shell-args))))
-        (exec-path-from-shell--debug "Shell printed: %S" (buffer-string))
-        (unless (zerop exit-code)
-          (error "Non-zero exit code from shell %s invoked with args %S.  Output was:\n%S"
-                 shell shell-args (buffer-string))))
-      (goto-char (point-min))
-      (if (re-search-forward "__RESULT\0\\(.*\\)\0__RESULT" nil t)
-          (match-string 1)
-        (error "Expected printf output from shell, but got: %S" (buffer-string))))))
+  (let ((shell (exec-path-from-shell--shell)))
+    (if (exec-path-from-shell--powershell-p shell)
+        (progn
+          (require 'exec-path-from-powershell)
+          (exec-path-from-powershell-printf shell str args))
+      (let* ((printf-bin (or (executable-find "printf") "printf"))
+             (printf-command
+              (concat (shell-quote-argument printf-bin)
+                      " '__RESULT\\000" str "\\000__RESULT' "
+                      (mapconcat #'exec-path-from-shell--double-quote args " ")))
+             (shell-args (append exec-path-from-shell-arguments
+                                 (list "-c"
+                                       (if (exec-path-from-shell--standard-shell-p shell)
+                                           printf-command
+                                         (concat "sh -c " (shell-quote-argument printf-command)))))))
+        (with-temp-buffer
+          (exec-path-from-shell--debug "Invoking shell %s with args %S" shell shell-args)
+          (let ((exit-code (exec-path-from-shell--warn-duration
+                            (apply #'call-process shell nil t nil shell-args))))
+            (exec-path-from-shell--debug "Shell printed: %S" (buffer-string))
+            (unless (zerop exit-code)
+              (error "Non-zero exit code from shell %s invoked with args %S.  Output was:\n%S"
+                     shell shell-args (buffer-string))))
+          (goto-char (point-min))
+          (if (re-search-forward "__RESULT\0\\(.*\\)\0__RESULT" nil t)
+              (match-string 1)
+            (error "Expected printf output from shell, but got: %S" (buffer-string))))))))
 
 (defun exec-path-from-shell-getenvs--nushell (names)
   "Use nushell to get the value of env vars with the given NAMES.
@@ -242,6 +254,9 @@ buffer is left undisplayed."
                   names (cdr names)))
           result)))))
 
+(declare-function exec-path-from-powershell-getenvs "exec-path-from-powershell"
+                  (shell names))
+
 (defun exec-path-from-shell-getenvs (names)
   "Get the environment variables with NAMES from the user's shell.
 
@@ -249,24 +264,30 @@ Execute the shell according to `exec-path-from-shell-arguments'.
 The result is a list of (NAME . VALUE) pairs."
   (when (file-remote-p default-directory)
     (error "You cannot run exec-path-from-shell from a remote buffer (Tramp, etc.)"))
-  (if (exec-path-from-shell--nushell-p (exec-path-from-shell--shell))
-      (exec-path-from-shell-getenvs--nushell names)
-    (let* ((random-default (md5 (format "%s%s%s" (emacs-pid) (random) (current-time))))
-           (dollar-names (mapcar (lambda (n) (format "${%s-%s}" n random-default)) names))
-           (values (split-string (exec-path-from-shell-printf
-                                  (mapconcat #'identity (make-list (length names) "%s") "\\000")
-                                  dollar-names) "\0")))
-      (let (result)
-        (while names
-          (prog1
-              (let ((value (car values)))
-                (push (cons (car names)
-                            (unless (string-equal random-default value)
-                              value))
-                      result))
-            (setq values (cdr values)
-                  names (cdr names))))
-        result))))
+  (let ((shell (exec-path-from-shell--shell)))
+    (cond
+     ((exec-path-from-shell--powershell-p shell)
+      (require 'exec-path-from-powershell)
+      (exec-path-from-powershell-getenvs shell names))
+     ((exec-path-from-shell--nushell-p shell)
+      (exec-path-from-shell-getenvs--nushell names))
+     (t
+      (let* ((random-default (md5 (format "%s%s%s" (emacs-pid) (random) (current-time))))
+             (dollar-names (mapcar (lambda (n) (format "${%s-%s}" n random-default)) names))
+             (values (split-string (exec-path-from-shell-printf
+                                    (mapconcat #'identity (make-list (length names) "%s") "\\000")
+                                    dollar-names) "\0")))
+        (let (result)
+          (while names
+            (prog1
+                (let ((value (car values)))
+                  (push (cons (car names)
+                              (unless (string-equal random-default value)
+                                value))
+                        result))
+              (setq values (cdr values)
+                    names (cdr names))))
+          result))))))
 
 (defun exec-path-from-shell-getenv (name)
   "Get the environment variable NAME from the user's shell.
